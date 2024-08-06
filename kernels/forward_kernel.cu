@@ -1,5 +1,4 @@
-#include <cuda.h>
-#include <stdio.h>
+#include <cuda_runtime.h>
 
 #define M 1024  // sram size
 
