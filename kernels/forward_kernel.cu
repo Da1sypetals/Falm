@@ -107,24 +107,21 @@ __global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
     }
 }
 
-// torch::Tensor forward(torch::Tensor& Q, torch::Tensor& K, torch::Tensor& V) {
+
+// int main() {
+//     int max_sram_size;
 //
+//     int Bc, Br = M / d, min(M / d, d);  // block size
+//     // int Bc, Br = 64, 64;
+//     // #threads = Br
+//     int Tc, Tr = N / br, N / br;  // tile index
+//
+//     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock,
+//                            0);
+//     printf("%d", max_sram_size);
+//
+//     dim3 grid_dim(batch_size, num);
+//     dim3 block_dim();
+//
+//     return 0;
 // }
-
-int main() {
-    int max_sram_size;
-
-    int Bc, Br = M / d, min(M / d, d);  // block size
-    // int Bc, Br = 64, 64;
-    // #threads = Br
-    int Tc, Tr = N / br, N / br;  // tile index
-
-    cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock,
-                           0);
-    printf("%d", max_sram_size);
-
-    dim3 grid_dim(batch_size, num);
-    dim3 block_dim();
-
-    return 0;
-}

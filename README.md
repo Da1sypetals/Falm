@@ -1,5 +1,7 @@
 # Flash Attention Lite
-
+## Prerequisites:
+- CUDA/CUDAtoolkit
+- 
 ## Details:
     - which part should be loaded in sram?
         Qi, Kj, Vj, Sij, Oi 
