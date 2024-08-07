@@ -3,8 +3,8 @@ import flash_attn
 
 
 # Use small model params, otherwise slower than manual attention. See caveats in README.
-batch_size = 16
-n_head = 12
+batch_size = 1
+n_head = 1
 seq_len = 64
 head_embd = 64
 

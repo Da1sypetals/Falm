@@ -17,7 +17,7 @@ setup(
             include_dirs=[include_dir],
             extra_compile_args={
                 'cxx': [],  # Any additional C++ compiler flags
-                'nvcc': ['-DTORCH_USE_CUDA_DSA']  # Enable device-side assertions
+                'nvcc': ['-DTORCH_USE_CUDA_DSA'] 
             }
         )
     ],

@@ -11,10 +11,12 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
     // d: dimention <int>(scaler)
     // Bc, Br: number of col/row per block
     // Tc, Tr: number of blocks 
-    int thread_id = threadIdx.x;
     int batch_id = blockIdx.x;
     int head_id = blockIdx.y;
+    int thread_id = threadIdx.x;
     int num_head = gridDim.y;
+    int num_threads = blockDim.x; //num_threads=Br
+
 
     // Differnt offset for different (batch, head)
     int qkv_offset = (batch_id * num_head * N * d) + (head_id * N * d);
@@ -28,26 +30,34 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
     float *smem_Qi = &sram[(2 * Bc * d)]; // size=(Br * d)
     float *smem_SPij = &sram[(2 * Bc * d) + Br + (Bc * Br)]; // size=(Bc * Br)
 
+    // printf("shared: %d, %d, %d\n", Bc * d, (2 * Bc * d), (2 * Bc * d) + (Bc * Br));
+
     const int offset_si = thread_id * Bc; // Different thread process different row of Sij 
 
     for (int j = 0; j < Tc; ++j) {
         // Collaboratively Load Ki, Vj to the shared_memory ()
         // Kj, Vj: Bc*d
-        for (int y = thread_id; y < Bc; y += Br) {
-            for (int x = 0; x < d; x += 1) {
-                // TODO: do we need to check range here
-                smem_Kj[y * d + x] = K[qkv_offset + (j * Bc * d) + y * d + x];
-                smem_Vj[y * d + x] = V[qkv_offset + (j * Bc * d) + y * d + x];
+        for (int y = thread_id; y < Bc; y += num_threads) {
+            if ((j * Bc + y) < N){ // Make sure global col < seq_len 
+
+              for (int x = 0; x < d; x += 1) {
+                  smem_Kj[y * d + x] = K[qkv_offset + (j * Bc * d) + (y * d) + x];
+                  smem_Vj[y * d + x] = V[qkv_offset + (j * Bc * d) + (y * d) + x];
+                  // printf("(%d/%d) ",y * d + x, Bc * d);
+                  // smem_Kj[y * d + x] = 0;
+                  // smem_Vj[y * d + x] = 0;
+              }
             }
         }
         __syncthreads();
 
         for (int i = 0; i < Tr; ++i) {
-            // Collaboratively Load Qi, Oi to shared memory
+            if ((i * Br + thread_id) >= N) continue; // Make sure global row < seq_len
+
+            // Collaboratively Load Qi to shared memory
             for (int x = 0; x < d; x += 1) {
-                smem_Qi[thread_id * d + x] = Q[qkv_offset + thread_id * d + x];
+               smem_Qi[thread_id * d + x] = Q[qkv_offset + (i * Br * d) + thread_id * d + x];
             }
-            __syncthreads();
 
             // Load li, mi from HBM to register
             float li = l[lm_offset + i + thread_id];
@@ -117,6 +127,7 @@ void lanuch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, to
     int num_heads = Q.size(1);
     int N = Q.size(2);
     int d = Q.size(3);
+    printf("Batch=%d, Head=%d, SeqLen=%d, EmbDim=%d\n", batch_size, num_heads, N, d);
     //
     int max_shared_memory;
     int max_threads_num;
@@ -126,18 +137,19 @@ void lanuch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, to
     int M = max_shared_memory / sizeof(float); // number of floats shared memory can hold
     int Bc = std::ceil(M / (4 * d));        
     int Br = std::min(std::min(Bc, d), max_threads_num);
-    int Tc = std::ceil(N / Bc);
-    int Tr = std::ceil(N / Br);
+    int Tc = (int)std::ceil(float(N) / Bc);
+    int Tr = (int)std::ceil(float(N) / Br);
 
     dim3 grid_dim(batch_size, num_heads);
     dim3 thread_block_dim(Br);
     // shared_memory_size
     // For: Ki, Vi, Qi, Sij 
-    const int shared_memory_size = ((2 * Bc * d) + (Br * d) + (Bc * Br));
+    const int shared_memory_size = sizeof(float) * ((2 * Bc * d) + (Br * d) + (Bc * Br));
     
-    printf("Max_shared(bytes)=%d, Max_shared(#dtype)=%d, Requested_memory(#data)=%d\n", max_shared_memory, M, shared_memory_size);
+    printf("Max_shared(bytes)=%d, Max_shared(#dtype)=%d, Requested_memory(bytes)=%d\n", max_shared_memory, M, shared_memory_size);
     TORCH_CHECK(shared_memory_size < max_shared_memory, "Shared memory size exceeds the device limit"); 
     
+    printf("N=%d, d=%d, Bc=%d, Br=%d, Tc=%d, Tr=%d\n", N, d, Bc, Br, Tc, Tr);
     // Launch
     forward_kernel<<<grid_dim, thread_block_dim, shared_memory_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), 
