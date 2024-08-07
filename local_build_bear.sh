@@ -1,1 +1,1 @@
-bear python setup.py build_ext --inplace
+bear "python setup.py build_ext --inplace"

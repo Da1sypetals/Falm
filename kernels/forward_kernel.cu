@@ -1,41 +1,40 @@
-#include <cuda_runtime.h>
+#include <cmath>
+#include "c10/util/Exception.h"
+#include "flash_attn_kernel.h"
 
-#define M 1024  // sram size
-
-__global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
-                              float *m, int N, int d, int Bc, int Br) {
+__global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
+                              float *m, const int N, const int d, const int Bc, const int Br, const int Tc, const int Tr) {
     // Q, K, V: query, key, value (N * d)
     // O, output: (N * d)
     // l, m: intermediate states (N)
-    // N: sequence length (scaler, int)
-    // d: dimention (scaler, int)
-    // Bc, Br: col/row block size
+    // N: sequence length <int>(scaler)
+    // d: dimention <int>(scaler)
+    // Bc, Br: number of col/row per block
+    // Tc, Tr: number of blocks 
     int thread_id = threadIdx.x;
     int batch_id = blockIdx.x;
     int head_id = blockIdx.y;
-    int batch_size = gridDim.x;
     int num_head = gridDim.y;
 
     // Differnt offset for different (batch, head)
     int qkv_offset = (batch_id * num_head * N * d) + (head_id * N * d);
     int lm_offset = (batch_id * num_head * N) + (head_id * N);
 
-    // Number of tile
-    int Tc = ceil(N / Bc);
-    int Tr = ceil(N / Br);
-
-    // Shared memory stored K, V, Q, O;
+    // Shared memory stored K, V, Q, SP;
+    // Note: SP stored Sij and Pij
     extern __shared__ float sram[];
-    float *smem_Kj = sram;
-    float *smem_Vj = &sram[Bc];
-    float *smem_Qi = &sram[Bc + Br];
-    float *smem_Oi = &sram[Bc + Br * 2];
+    float *smem_Kj = sram; // size=(Bc * d) 
+    float *smem_Vj = &sram[Bc * d]; // size=(Bc * d)
+    float *smem_Qi = &sram[(2 * Bc * d)]; // size=(Br * d)
+    float *smem_SPij = &sram[(2 * Bc * d) + Br + (Bc * Br)]; // size=(Bc * Br)
+
+    const int offset_si = thread_id * Bc; // Different thread process different row of Sij 
 
     for (int j = 0; j < Tc; ++j) {
         // Collaboratively Load Ki, Vj to the shared_memory ()
         // Kj, Vj: Bc*d
         for (int y = thread_id; y < Bc; y += Br) {
-            for (int x = 0; 0 < d; x += 1) {
+            for (int x = 0; x < d; x += 1) {
                 // TODO: do we need to check range here
                 smem_Kj[y * d + x] = K[qkv_offset + (j * Bc * d) + y * d + x];
                 smem_Vj[y * d + x] = V[qkv_offset + (j * Bc * d) + y * d + x];
@@ -47,7 +46,6 @@ __global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
             // Collaboratively Load Qi, Oi to shared memory
             for (int x = 0; x < d; x += 1) {
                 smem_Qi[thread_id * d + x] = Q[qkv_offset + thread_id * d + x];
-                smem_Oi[thread_id * d + x] = O[qkv_offset + thread_id * d + x];
             }
             __syncthreads();
 
@@ -56,28 +54,27 @@ __global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
             float mi = m[lm_offset + i + thread_id];
 
             // Compute Sij = Qi * Kj^transpose
-            float Si[Bc];
             for (int c = 0; c < Bc; c += 1) {
-                Si[c] = 0;
+                smem_SPij[offset_si + c] = 0;
                 for (int x = 0; x < d; x += 1) {
-                    Si[c] += smem_Qi[thread_id * d + x] * smem_Kj[c * d + x];
+                    smem_SPij[offset_si + c] += smem_Qi[thread_id * d + x] * smem_Kj[c * d + x];
                 }
             }
-            // Find new maximum mi
-            float mi_tilde = Si[0];  // maximum inside this block
+
+            // Find new maximum mi for each row
+            float mi_tilde = -INFINITY;  // maximum inside this block
             for (int c = 1; c < Bc; c += 1) {
-                mi_tilde = max(mi_tilde, Si[c]);
+                mi_tilde = max(mi_tilde, smem_SPij[offset_si + c]);
             }
 
-            // Calculate Pi
-            float Pi[Bc];  // Bc
+            // Calculate Pij 
             float li_tilde = 0;
             for (int c = 1; c < Bc; c += 1) {
-                Pi[c] = __expf(Si[c] - mi_tilde);
-                li += Pi[c];
+                smem_SPij[offset_si + c] = __expf(smem_SPij[offset_si + c] - mi_tilde);
+                li += smem_SPij[offset_si + c];
             }
 
-            // Compute mi, li
+            // Compute mi_new, li_new
             float mi_new = max(mi_tilde, mi);
             float li_new =
                 __expf(mi - mi_new) * li + __expf(mi_tilde - mi_new) * li_tilde;
@@ -87,12 +84,12 @@ __global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
                 // Calculate Pij * Vj
                 float pv = 0;
                 for (int c = 0; c < Bc; c += 1) {
-                    pv += Pi[c] * smem_Vj[c * d + x];
+                    pv += smem_SPij[offset_si + c] * smem_Vj[c * d + x];
                 }
 
                 O[qkv_offset + (i * Br * d) + (thread_id * d) + x] =
                     (1 / li_new) *
-                    ((li * __expf(mi - mi_tilde) * smem_Oi[thread_id * d + x]) +
+                    ((li * __expf(mi - mi_tilde) * O[qkv_offset + (i * Br * d) + (thread_id * d) + x]) +
                      __expf(mi_tilde - mi_new * pv));
             }
 
@@ -106,21 +103,48 @@ __global__ void foward_kernel(float *Q, float *K, float *V, float *O, float *l,
     }
 }
 
+inline void CHECK_CUDA_ERROR() {                                          
+    cudaError_t err = cudaGetLastError();                            
+    if (err != cudaSuccess) {                                         
+        std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl; 
+        exit(err);                                                    
+    }                                                                 
+}
 
-// int main() {
-//     int max_sram_size;
-//
-//     int Bc, Br = M / d, min(M / d, d);  // block size
-//     // int Bc, Br = 64, 64;
-//     // #threads = Br
-//     int Tc, Tr = N / br, N / br;  // tile index
-//
-//     cudaDeviceGetAttribute(&max_sram_size, cudaDevAttrMaxSharedMemoryPerBlock,
-//                            0);
-//     printf("%d", max_sram_size);
-//
-//     dim3 grid_dim(batch_size, num);
-//     dim3 block_dim();
-//
-//     return 0;
-// }
+void lanuch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor l, torch::Tensor m, torch::Tensor O) {
+    // 
+    int batch_size = Q.size(0);
+    int num_heads = Q.size(1);
+    int N = Q.size(2);
+    int d = Q.size(3);
+    //
+    int max_shared_memory;
+    int max_threads_num;
+    cudaDeviceGetAttribute(&max_shared_memory, cudaDevAttrMaxSharedMemoryPerBlock, 0);
+    cudaDeviceGetAttribute(&max_threads_num, cudaDevAttrMaxThreadsPerBlock, 0);
+    //TODO: Dynamic datatype 
+    int M = max_shared_memory / sizeof(float); // number of floats shared memory can hold
+    int Bc = std::ceil(M / (4 * d));        
+    int Br = std::min(std::min(Bc, d), max_threads_num);
+    int Tc = std::ceil(N / Bc);
+    int Tr = std::ceil(N / Br);
+
+    dim3 grid_dim(batch_size, num_heads);
+    dim3 thread_block_dim(Br);
+    // shared_memory_size
+    // For: Ki, Vi, Qi, Sij 
+    const int shared_memory_size = ((2 * Bc * d) + (Br * d) + (Bc * Br));
+    
+    printf("Max_shared(bytes)=%d, Max_shared(#dtype)=%d, Requested_memory(#data)=%d\n", max_shared_memory, M, shared_memory_size);
+    TORCH_CHECK(shared_memory_size < max_shared_memory, "Shared memory size exceeds the device limit"); 
+    
+    // Launch
+    forward_kernel<<<grid_dim, thread_block_dim, shared_memory_size>>>(
+        Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), 
+        O.data_ptr<float>(), l.data_ptr<float>(), m.data_ptr<float>(), 
+        N, d, Bc, Br, Tc, Tr
+    );
+    
+    CHECK_CUDA_ERROR();
+}
+
