@@ -15,10 +15,10 @@ setup(
                 'kernels/backward_kernel.cu'
             ],
             include_dirs=[include_dir],
-            extra_compile_args={
-                'cxx': ['-O1'],  # Any additional C++ compiler flags
-                'nvcc': ['-O1', '--threads=8'] 
-            }
+            # extra_compile_args={
+            #     'cxx': [],  # Any additional C++ compiler flags
+            #     'nvcc': [] 
+            # }
         )
     ],
     cmdclass={
