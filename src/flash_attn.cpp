@@ -31,6 +31,14 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     torch::Tensor m = torch::full({batch_size, num_heads, N}, -INFINITY).cuda();    
     torch::Tensor O = torch::zeros({batch_size, num_heads, N, d}).cuda();
     
+    // std::string ls = l.toString();
+    // std::string ms = m.toString();
+    // std::string os = O.toString();
+
+    // std::cout << l << std::endl;
+    // std::cout << m << std::endl;
+    // std::cout << O << std::endl;
+
     lanuch_forward_kernel(Q, K, V, l, m, O);
     return O;
 }

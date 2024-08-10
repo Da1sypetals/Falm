@@ -16,12 +16,12 @@ setup(
             ],
             include_dirs=[include_dir],
             extra_compile_args={
-                'cxx': [],  # Any additional C++ compiler flags
-                'nvcc': ['-DTORCH_USE_CUDA_DSA'] 
+                'cxx': ['-O1'],  # Any additional C++ compiler flags
+                'nvcc': ['-O1', '--threads=8'] 
             }
         )
     ],
     cmdclass={
-        'build_ext': BuildExtension
+        'build_ext': BuildExtension.with_options(parallel=True)
     }
 )
