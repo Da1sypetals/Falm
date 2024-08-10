@@ -3,6 +3,8 @@
 
 __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                               float *m, const int N, const int d, const int Bc, const int Br, const int Tc, const int Tr) {
+    // Given Q, K, V, we need to compute O 
+    //
     // Q, K, V: query, key, value (N * d)
     // O, output: (N * d)
     // l, m: intermediate states (N)
