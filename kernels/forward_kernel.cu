@@ -31,7 +31,7 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
     float * const smem_Kj = &sram[0]; // size=(Bc * d) 
     float * const smem_Vj = &sram[Bc * d]; // size=(Bc * d)
     float * const smem_Qi = &sram[Bc * d + Bc * d]; // size=(Br * d)
-    float * const smem_SPij = &sram[ Bc * d + Bc * d + Br * d]; // size=(Bc * Br)
+    float * const smem_SPij = &sram[Bc * d + Bc * d + Br * d]; // size=(Bc * Br)
 
     // printf("thread=%d shared: %d, %d, %d\n", thread_id, Vj_offset, Qi_offset, SPij_offset);
     const int offset_si = thread_id * Bc; // Different thread process different row of Sij 
