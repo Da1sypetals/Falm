@@ -179,7 +179,7 @@ void launch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, t
     cudaDeviceGetAttribute(&max_threads_num, cudaDevAttrMaxThreadsPerBlock, 0);
 
     // Fix Tile size
-    const int block_size = 4;
+    const int block_size = 32;
     int Bc = block_size;
     int Br = block_size;
     int Tc = (int)std::ceil((float)N / Bc);
