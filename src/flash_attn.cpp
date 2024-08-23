@@ -1,5 +1,4 @@
 #include <cmath>
-#include <algorithm>
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include "ATen/core/TensorBody.h"
@@ -8,7 +7,7 @@
 #include <tuple>
 
 // Forward function declaration
-torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     // Implementation of the forward pass (CUDA)
 
     // Ensure tensors are on the same device
@@ -42,12 +41,12 @@ torch::Tensor forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     // std::cout << m << std::endl;
     // std::cout << O << std::endl;
 
-    lanuch_forward_kernel(Q, K, V, l, m, O);
-    return O;
+    launch_forward_kernel(Q, K, V, l, m, O);
+    return std::make_tuple(O, l, m);
 }
 
 // Backward function declaration
-torch::Tensor backward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor dO, torch::Tensor l, torch::Tensor m) {
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> backward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor dO, torch::Tensor l, torch::Tensor m) {
     // Implementation of the backward pass
     // Call CUDA kernels or perform computations here
     // Ensure tensors are on the same device
@@ -74,16 +73,16 @@ torch::Tensor backward(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch:
     int N = sizes[2];
     int d = sizes[3];
 
-    TORCH_CHECK(l.sizes() == std::make_tuple(batch_size, num_heads, N), "l must have compatible size with QKVO");
-    TORCH_CHECK(m.sizes() == std::make_tuple(batch_size, num_heads, N), "m must have compatible size with QKVO");
+    TORCH_CHECK(l.sizes()[0] == batch_size && l.sizes()[1] == num_heads && l.sizes()[2] == N, "l must have compatible size with QKVO");
+    TORCH_CHECK(m.sizes()[0] == batch_size && m.sizes()[1] == num_heads && m.sizes()[2] == N, "m must have compatible size with QKVO");
 
     //dQ, dK, dV  
-
     torch::Tensor dQ = torch::zeros({batch_size, num_heads, N, d}).cuda();
     torch::Tensor dK = torch::zeros({batch_size, num_heads, N, d}).cuda();
     torch::Tensor dV = torch::zeros({batch_size, num_heads, N, d}).cuda();
 
-    return ;
+    launch_backward_kernel(Q, K, V, O, dQ, dK, dV, dO, l, m); 
+    return std::make_tuple(dQ, dK, dV);
 }
 
 // Binding code

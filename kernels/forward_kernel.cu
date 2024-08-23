@@ -137,7 +137,7 @@ inline void CHECK_CUDA_ERROR() {
     }                                                                 
 }
 
-void lanuch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor l, torch::Tensor m, torch::Tensor O) {
+void launch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor l, torch::Tensor m, torch::Tensor O) {
     // 
     int batch_size = Q.size(0);
     int num_heads = Q.size(1);
