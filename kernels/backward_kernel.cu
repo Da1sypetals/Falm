@@ -3,32 +3,30 @@
 
 
 __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float* dQ, float* dK, float* dV, float* dO, float *l,
-                              float *m, const int N, const int d, const int block_size, const int Tc, const int Tr) {
+                              float *m, const int N, const int d, const int Tc, const int Tr) {
     
-    // Given Q, K, V, O, dO, l, m we need to compute dQ, dK, dV
+    // Given Q, K, V, O, dO, l, m, we need to compute dQ, dK, dV
     // 
-    // Q, K, V: query, key, value (N * d)
-    // O, output: (N * d)
+    // Q, K, V, O: query, key, value, output (N * d)
     // l, m: intermediate states (N)
 
     // N: sequence length <int>(scaler)
     // d: dimention <int>(scaler)
-    // block_size: number of col/row per block
     // Tc, Tr: number of blocks 
  
     int batch_id = blockIdx.x;
     int head_id = blockIdx.y;
     int thread_id = threadIdx.x;
     int num_heads = gridDim.y;
-    int tile_size = blockDim.x; //num_threads=tile_size
+    int block_size = blockDim.x; // tile_size
 
     // Differnt offset for different (batch, head)
     int qkvo_offset = (batch_id * num_heads * N * d) + (head_id * N * d);
     int lm_offset = (batch_id * num_heads * N) + (head_id * N);
 
     extern __shared__ float sram[];
-    //K, V, Q, O, dK, dV, dO has size=block_size * d
-    //SPij, dSPij has size=block_size * block_size
+    // K, V, Q, O, dK, dV, dO has size=block_size * d
+    // SPij, dSPij has size=block_size * block_size
     float * const smem_Kj = &sram[0]; 
     float * const smem_Vj = &sram[block_size * d]; 
     float * const smem_Oi = &sram[block_size * d * 2]; 
@@ -41,15 +39,17 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float* d
     
     int offset_si = block_size * thread_id;
 
-
     for (int j = 0; j < Tc; ++j) {
+      
+      const int num_cols = min(block_size, N - (block_size * j));
+      
       // Load Kj, Vj to shared memory
       if ((j * block_size + thread_id) < N) { // Make sure global col < seq_len 
         for (int x = 0; x < d; x += 1) {
             smem_Kj[thread_id * d + x] = K[qkvo_offset + (j * block_size * d) + (thread_id * d) + x];
             smem_Vj[thread_id * d + x] = V[qkvo_offset + (j * block_size * d) + (thread_id * d) + x];
-            // printf("thread=%d, load q=%f\n", thread_id, smem_Kj[offset_si + c]);
-            // printf("thread=%d, load k=%f\n", thread_id, smem_Vj[offset_si + c]);
+            // printf("thread=%d, load k=%f\n", thread_id, smem_Kj[thread_id * d + x]);
+            // printf("thread=%d, load v=%f\n", thread_id, smem_Vj[thread_id * d + x]);
         }
       }
       // Initialize dKj, dVj on shared_memory 
@@ -59,23 +59,25 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float* d
       } 
       __syncthreads();
 
-      const int num_cols = min(block_size, N - (block_size * j));
 
       for (int i = 0; i < Tr; ++i) {
+
+        const int num_rows = min(block_size, N - (block_size * i));
+
         if ((i * block_size + thread_id) < N) { // Make sure global col < seq_len 
           // Load Qi, dOi to register 
           for (int x = 0; x < d; x += 1) {
               smem_Qi[thread_id * d + x] = Q[qkvo_offset + (i * block_size * d) + (thread_id * d) + x];
               smem_Oi[thread_id * d + x] = O[qkvo_offset + (i * block_size * d) + (thread_id * d) + x];
               smem_dOi[thread_id * d + x] = dO[qkvo_offset + (i * block_size * d) + (thread_id * d) + x];
-              // printf("thread=%d, load q=%f\n", thread_id, smem_Kj[offset_si + c]);
-              // printf("thread=%d, load k=%f\n", thread_id, smem_Vj[offset_si + c]);
+              // printf("thread=%d, load q =%f, at pos=%d\n", thread_id, smem_Qi[thread_id * d + x], thread_id * d + x);
+              // printf("thread=%d, load o=%f\n", thread_id, smem_Oi[thread_id * d + x]);
           }
-        
+          __syncthreads();
           // Load li, mi from HBM to register
           float li = l[lm_offset + (i * block_size) + thread_id];
           float mi = m[lm_offset + (i * block_size) + thread_id];
-
+          
           // Compute Sij
           // Sij = Qi * Kj 
           for (int c = 0; c < num_cols; c += 1) {
@@ -90,65 +92,79 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float* d
               // printf("thread=%d, writes: %f to sram[%d] Sij_off=%d + %d (Bc=%d, Br=%d, d=%d)\n", 
               //     thread_id, row_sum, (Bc * d + Bc * d + Br * d) + offset_si + c, (Bc * d + Bc * d + Br * d), offset_si + c, Bc, Br, d); 
               smem_SPij[offset_si + c] = row_sum;
+              // printf("thread=%d, compute s=%f\n", thread_id, smem_SPij[offset_si + c]);
           }
 
           // Compute Pij 
           // Pij = 1/li * Sij
           for (int c = 0; c < num_cols; c += 1) {
             smem_SPij[offset_si + c] = __expf(smem_SPij[offset_si + c] - mi) / li;
+            // printf("thread=%d, compute p=%f\n", thread_id, smem_SPij[offset_si + c]);
           }
+        }
+        
+
+          __syncthreads();
 
           // Update dVj
           // dVj += Pij_transpose * dOi
           for (int x = 0; x < d; x += 1) {
             float row_sum = 0;
-            for (int c = 0; c < num_cols; c += 1) {
-              row_sum += smem_SPij[c * block_size + thread_id] * smem_dOi[c * block_size + x];
+            for (int r = 0; r < num_rows; r += 1) {
+              row_sum += smem_SPij[r * block_size + thread_id] * smem_dOi[r * d + x];
+              // if (thread_id == 0){
+                // printf("%f * %f(at pos=%d)\n", smem_SPij[c * block_size + thread_id], smem_dOi[c * d + x], c * d + x);
+              // }
             }
+            // printf("thread=%d, compute dv=%f\n", thread_id, row_sum);
             smem_dVj[thread_id * d + x] += row_sum; 
           }
 
-          // Compute dPij 
-          // dPij = dOi * Vj_transpose
-          for (int c = 0; c < num_cols; c += 1) {
-            float row_sum = 0;
-            for (int x = 0; x < d; x += 1) {
-              row_sum += smem_dOi[thread_id * d + x] * smem_Vj[c * block_size + x];
-            }  
-            smem_dSPij[thread_id * block_size + c] = row_sum;
-          }
-          
-          // Compute dSij 
-          // Di = row_sum(dOi o Oi) 
-          // dSij = Pij o (dPij - Di)
-          float Di = 0;
-          for (int x = 0; x < d; x += 1) {
-            Di += smem_dOi[thread_id * d + x] * O[thread_id * d + x];
-          } 
-          for (int c = 0; c < num_cols; c += 1){
-            smem_dSPij[thread_id * block_size + c] = smem_SPij[thread_id * block_size + c] * (smem_dSPij[thread_id * block_size + c] - Di);
-          }
-
-          // Write updated dQi to HBM 
-          // dQi += dSij * Kj
-          for (int x = 0; x < d; x += 1) {
-            float row_sum = 0;
+          if ((i * block_size + thread_id) < N) {
+            // Compute dPij 
+            // dPij = dOi * Vj_transpose
             for (int c = 0; c < num_cols; c += 1) {
-              row_sum += smem_dSPij[thread_id * block_size + d] * smem_Kj[c * d + x];
+              float row_sum = 0;
+              for (int x = 0; x < d; x += 1) {
+                row_sum += smem_dOi[thread_id * d + x] * smem_Vj[c * d + x];
+              }  
+              smem_dSPij[thread_id * block_size + c] = row_sum;
+              // printf("thread=%d, (i=%d,j=%d) compute dp=%f\n", thread_id, i,j, smem_dSPij[thread_id * block_size + c]);
             }
-            dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] = row_sum; 
-          }
+             
+            // Compute dSij 
+            // Di = row_sum(dOi o Oi) 
+            // dSij = Pij o (dPij - Di)
+            float Di = 0;
+            for (int x = 0; x < d; x += 1) {
+              Di += smem_dOi[thread_id * d + x] * smem_Oi[thread_id * d + x];
+            } 
+            for (int c = 0; c < num_cols; c += 1){
+              smem_dSPij[thread_id * block_size + c] = smem_SPij[thread_id * block_size + c] * (smem_dSPij[thread_id * block_size + c] - Di);
+               // printf("thread=%d, (i=%d,j=%d) compute ds=%f\n", thread_id, i, j, smem_dSPij[thread_id * block_size + c]);
+            }
+            __syncthreads();
+
+            // Write updated dQi to HBM 
+            // dQi += dSij * Kj
+            for (int x = 0; x < d; x += 1) {
+              float row_sum = 0;
+              for (int c = 0; c < num_cols; c += 1) {
+                row_sum += smem_dSPij[thread_id * block_size + c] * smem_Kj[c * d + x];
+              }
+              dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += row_sum; 
+            }
           
+          }
           // Update dKj 
           // dKj += dSij_transpose * Qi
           for (int x = 0; x < d; x += 1) {
             float row_sum = 0;
-            for (int c = 0; c < num_cols; c += 1) {
-              row_sum += smem_dSPij[thread_id * x + c] * smem_Qi[thread_id * c + x]; 
+            for (int r = 0; r < num_rows; r += 1) {
+              row_sum += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x]; 
             }
-            smem_dKj[thread_id * d + x] = row_sum;
+            smem_dKj[thread_id * d + x] += row_sum;
           }
-        }
         // Make sure Qi, O, dOi load correctly
         __syncthreads(); 
       }
@@ -156,9 +172,10 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float* d
       if ((j * block_size + thread_id) < N) { // Make sure global col < seq_len 
         for (int x = 0; x < d; x += 1) {
            dK[qkvo_offset + (j * block_size * d) + (thread_id * d) + x] = smem_dKj[thread_id * d + x];
-           dV[qkvo_offset + (j * block_size * d) + (thread_id * d) + x] =  smem_dVj[thread_id * d + x];
+           dV[qkvo_offset + (j * block_size * d) + (thread_id * d) + x] = smem_dVj[thread_id * d + x];
         }
       }
+      __syncthreads();
     }
 
 }
@@ -171,7 +188,7 @@ inline void CHECK_CUDA_ERROR() {
     }                                                                 
 }
 
-void lanuch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor dQ, torch::Tensor dK, torch::Tensor dV, torch::Tensor dO, torch::Tensor l, torch::Tensor m) {
+void launch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor O, torch::Tensor dQ, torch::Tensor dK, torch::Tensor dV, torch::Tensor dO, torch::Tensor l, torch::Tensor m) {
     // 
     int batch_size = Q.size(0);
     int num_heads = Q.size(1);
@@ -185,17 +202,16 @@ void lanuch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, t
     cudaDeviceGetAttribute(&max_threads_num, cudaDevAttrMaxThreadsPerBlock, 0);
     
     // Fix Tile size
-    const int block_size = 32;
+    const int block_size = 4;
     int Bc = block_size;        
     int Br = block_size;
-    int Tc = std::ceil(N/Bc);
-    int Tr = std::ceil(N/Br);
+    int Tc = (int)std::ceil((float)N/Bc);
+    int Tr = (int)std::ceil((float)N/Br);
 
     dim3 grid_dim(batch_size, num_heads);
     dim3 thread_block_dim(block_size);
     // shared_memory_size
-    // For: Kj, Vj, Qi, Oi, dKj, dVj dOi, Sij dSij 
-
+    // For: Kj, Vj, Qi, Oi, dKj, dVj, dOi, SPij dSPij 
     const int shared_memory_size = sizeof(float) * ((7 * block_size * d) + (2 * block_size * block_size));
     
     printf("Max_shared(bytes)=%d, Requested_memory(bytes)=%d\n", max_shared_memory, shared_memory_size);
@@ -208,7 +224,7 @@ void lanuch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, t
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(), 
         dQ.data_ptr<float>(), dK.data_ptr<float>(), dV.data_ptr<float>(), dO.data_ptr<float>(), 
         l.data_ptr<float>(), m.data_ptr<float>(), 
-        N, d, block_size, Tc, Tr
+        N, d, Tc, Tr
     );
     
     CHECK_CUDA_ERROR();
