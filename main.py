@@ -1,77 +1,87 @@
 import torch
-# import flash_attn
+import flash_attn
+import torch.nn.functional as F
 
 torch.manual_seed(0)
 
+def test_forward():
+    batch_size = 10
+    n_head = 1
+    seq_len = 400 
+    head_embd = 4 
 
-# # Use small model params, otherwise slower than manual attention. See caveats in README.
-# batch_size = 1
-# n_head = 1
-# seq_len = 64 
-# head_embd = 64 
-#
-# q = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
-# k = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
-# v = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
-#
-# # q = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=torch.float).reshape(1, 1, 4, 4).cuda()
-# # k = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=torch.float).reshape(1, 1, 4, 4).cuda()
-# # v = torch.tensor([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], dtype=torch.float).reshape(1, 1, 4, 4).cuda()
-#
-#
-# o = flash_attn.forward(q, k, v)
-#
-# print(o)
-# print(o.size());
-#
-#
-# import torch.nn.functional as F
-#
-# print('======QKV======')
-# # print(q)
-# # print(k)
-# # print(v)
-# s = torch.matmul(q, k.transpose(-2, -1))
-# # print(s)
-# p = F.softmax(s, dim=-1)
-# # print(p.size())
-# ans = torch.matmul(p, v)
-# print(ans)
-#
-# are_close = torch.allclose(o, ans, atol=1e-2)  # `atol` is the absolute tolerance
-# assert are_close, "Testcase is wrong"
+    q = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
+    k = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
+    v = torch.randn(batch_size, n_head, seq_len, head_embd).cuda()
 
+    print('======Attention======')
+    s = torch.matmul(q, k.transpose(-2, -1))
+    p = F.softmax(s, dim=-1)
+    o = torch.matmul(p, v)
+    # print(o)
 
-# Dimensions
-batch_size = 1
-n_head = 1
-seq_length = 4 
-embedding_dim = 4
+    print('======Flash Attention======')
+    flash_o, flash_l, flash_m = flash_attn.forward(q, k, v)
+    # print(flash_o)
+    # print(flash_l)
+    # print(flash_m)
 
-Q = torch.randn(batch_size, n_head, seq_length, embedding_dim, requires_grad=True)
-K = torch.randn(batch_size, n_head, seq_length, embedding_dim, requires_grad=True)
-V = torch.randn(batch_size, n_head, seq_length, embedding_dim, requires_grad=True)
-O = torch.randn(batch_size, n_head, seq_length, embedding_dim, requires_grad=True)
-dO = torch.randn_like(O)  # Assuming dO has the same shape as O
+    are_close = torch.allclose(o, flash_o, atol=1e-2)  # `atol` is the absolute tolerance
+    assert are_close, "foward is wrong"
 
-# Compute attention scores (assuming scaled dot-product attention)
-#TODO: /scaling factor, which is sqrt(k)
-attn_scores = torch.matmul(Q, K.transpose(-2, -1))
-attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+def test_backward():
+    batch_size = 5 
+    n_head = 2
+    seq_len = 6 
+    head_embed = 2
 
-# Compute output
-O = torch.matmul(attn_probs, V)
+    q = torch.randn(batch_size, n_head, seq_len, head_embed, requires_grad=True).cuda()
+    k = torch.randn(batch_size, n_head, seq_len, head_embed, requires_grad=True).cuda()
+    v = torch.randn(batch_size, n_head, seq_len, head_embed, requires_grad=True).cuda()
 
-# Backpropagate the gradient from dO
-O.backward(dO)
+    print('======Attention======')
+    s = torch.matmul(q, k.transpose(-2, -1))
+    m = torch.max(s, dim=-1, keepdim=True)[0]
+    exp_scores = torch.exp(s - m)
+    l = torch.sum(exp_scores, dim=-1, keepdim=True)
+    p = exp_scores / l
+    o = torch.matmul(p, v)
+    
+    #random init o's gradient
+    do = torch.randn_like(o).cuda()
 
-# Gradients
-dQ = Q.grad
-dK = K.grad
-dV = V.grad
+    q.retain_grad()
+    k.retain_grad()
+    v.retain_grad()
+    p.retain_grad()
+    s.retain_grad()
 
-# Printing the results
-print("dQ:", dQ)
-print("dK:", dK)
-print("dV:", dV)
+    o.backward(do)
 
+    dq = q.grad
+    dk = k.grad
+    dv = v.grad
+
+    # print("dP", p.grad)
+    # print("dS", s.grad)  
+    # print("dQ:", dq)
+    # print("dK:", dk)
+    # print("dV:", dv)
+
+    print('======Flash Attention======')
+    flash_dq, flash_dk, flash_dv = flash_attn.backward(q, k, v, o, do, l, m)
+    # print("dQ:", flash_dq)
+    # print("dK:", flash_dk)
+    # print("dV:", flash_dv)
+
+    dq_are_close = torch.allclose(dq, flash_dq, atol=1e-2)  # `atol` is the absolute tolerance
+    dk_are_close = torch.allclose(dk, flash_dk, atol=1e-2)  # `atol` is the absolute tolerance
+    dv_are_close = torch.allclose(dv, flash_dv, atol=1e-2)  # `atol` is the absolute tolerance
+
+    assert dq_are_close, "Calculation of Q_grad is wrong"
+    assert dk_are_close, "Calculation of K_grad is wrong"
+    assert dv_are_close, "Calculation of V_grad is wrong"
+
+if __name__ == "__main__":
+    test_forward()
+    test_backward()
