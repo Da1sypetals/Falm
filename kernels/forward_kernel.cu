@@ -64,11 +64,11 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
 
                 // Compute Sij = Qi * Kj^transpose
                 for (int c = 0; c < num_cols; c += 1) {
-                    float row_sum = 0;
+                    float dot = 0;
                     for (int x = 0; x < d; x += 1) {
-                        row_sum += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
+                        dot += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
                     }
-                    smem_SPij[offset_si + c] = row_sum;
+                    smem_SPij[offset_si + c] = dot;
                 }
 
                 // Find new maximum mi for each row
@@ -91,15 +91,15 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                 // Write Oi to HBM
                 for (int x = 0; x < d; x += 1) {
                     // Calculate Pij * Vj
-                    float pv = 0;
+                    float pv_dot = 0;
                     for (int c = 0; c < num_cols; c += 1) {
-                        pv += smem_SPij[offset_si + c] * smem_Vj[c * d + x];
+                        pv_dot += smem_SPij[offset_si + c] * smem_Vj[c * d + x];
                     }
 
                     O[qkv_offset + (i * Br * d) + (thread_id * d) + x] =
                         (1 / li_new) *
                         ((li * __expf(mi - mi_new) * O[qkv_offset + (i * Br * d) + (thread_id * d) + x]) +
-                         __expf(mi_tilde - mi_new) * pv);
+                         __expf(mi_tilde - mi_new) * pv_dot);
                 }
 
                 // Write li, mi to HBM

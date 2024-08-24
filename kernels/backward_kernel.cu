@@ -72,11 +72,11 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                 // Compute Sij
                 // Sij = Qi * Kj
                 for (int c = 0; c < num_cols; c += 1) {
-                    float row_sum = 0;
+                    float dot = 0;
                     for (int x = 0; x < d; x += 1) {
-                        row_sum += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
+                        dot += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
                     }
-                    smem_SPij[offset_si + c] = row_sum;
+                    smem_SPij[offset_si + c] = dot;
                 }
 
                 // Compute Pij
@@ -92,22 +92,22 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
             // dVj += Pij_transpose * dOi
             // Note: Avoid to check global row because each thread should write 1 col to dVj
             for (int x = 0; x < d; x += 1) {
-                float row_sum = 0;
+                float dot = 0;
                 for (int r = 0; r < num_rows; r += 1) {
-                    row_sum += smem_SPij[r * block_size + thread_id] * smem_dOi[r * d + x];
+                    dot += smem_SPij[r * block_size + thread_id] * smem_dOi[r * d + x];
                 }
-                smem_dVj[thread_id * d + x] += row_sum;
+                smem_dVj[thread_id * d + x] += dot;
             }
 
             if ((i * block_size + thread_id) < N) {
                 // Compute dPij
                 // dPij = dOi * Vj_transpose
                 for (int c = 0; c < num_cols; c += 1) {
-                    float row_sum = 0;
+                    float dot = 0;
                     for (int x = 0; x < d; x += 1) {
-                        row_sum += smem_dOi[thread_id * d + x] * smem_Vj[c * d + x];
+                        dot += smem_dOi[thread_id * d + x] * smem_Vj[c * d + x];
                     }
-                    smem_dSPij[thread_id * block_size + c] = row_sum;
+                    smem_dSPij[thread_id * block_size + c] = dot;
                 }
 
                 // Compute dSij
@@ -126,21 +126,21 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                 // Write updated dQi to HBM
                 // dQi += dSij * Kj
                 for (int x = 0; x < d; x += 1) {
-                    float row_sum = 0;
+                    float dot = 0;
                     for (int c = 0; c < num_cols; c += 1) {
-                        row_sum += smem_dSPij[thread_id * block_size + c] * smem_Kj[c * d + x];
+                        dot += smem_dSPij[thread_id * block_size + c] * smem_Kj[c * d + x];
                     }
-                    dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += row_sum;
+                    dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += dot;
                 }
             }
             // Update dKj
             // dKj += dSij_transpose * Qi
             for (int x = 0; x < d; x += 1) {
-                float row_sum = 0;
+                float dot = 0;
                 for (int r = 0; r < num_rows; r += 1) {
-                    row_sum += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x];
+                    dot += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x];
                 }
-                smem_dKj[thread_id * d + x] += row_sum;
+                smem_dKj[thread_id * d + x] += dot;
             }
             // Make sure Qi, O, dOi load correctly
             __syncthreads();
