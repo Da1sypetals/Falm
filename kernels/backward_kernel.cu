@@ -39,9 +39,10 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
 
     for (int j = 0; j < Tc; ++j) {
         const int num_cols = min(block_size, N - (block_size * j));
+        const int global_col = j * block_size + thread_id;
 
         // Load Kj, Vj to shared memory
-        if ((j * block_size + thread_id) < N) {  // Make sure global col < seq_len
+        if (global_col < N) {  // Make sure global col < seq_len
             for (int x = 0; x < d; x += 1) {
                 smem_Kj[thread_id * d + x] = K[qkvo_offset + (j * block_size * d) + (thread_id * d) + x];
                 smem_Vj[thread_id * d + x] = V[qkvo_offset + (j * block_size * d) + (thread_id * d) + x];
@@ -56,8 +57,9 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
 
         for (int i = 0; i < Tr; ++i) {
             const int num_rows = min(block_size, N - (block_size * i));
-
-            if ((i * block_size + thread_id) < N) {  // Make sure global row < seq_len
+            const global_row = i * block_size + thread_id; 
+   
+            if (global_row < N) {  // Make sure global row < seq_len
                 // Load Qi, dOi to register
                 for (int x = 0; x < d; x += 1) {
                     smem_Qi[thread_id * d + x] = Q[qkvo_offset + (i * block_size * d) + (thread_id * d) + x];
@@ -85,21 +87,23 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                     smem_SPij[offset_si + c] = __expf(smem_SPij[offset_si + c] - mi) / li;
                 }
             }
-
             __syncthreads();
 
-            // Update dVj
-            // dVj += Pij_transpose * dOi
-            // Note: Avoid to check global row because each thread should write 1 col to dVj
-            for (int x = 0; x < d; x += 1) {
-                float dot = 0;
-                for (int r = 0; r < num_rows; r += 1) {
-                    dot += smem_SPij[r * block_size + thread_id] * smem_dOi[r * d + x];
+            
+            if (global_col < N) {
+                // Note: Check global column because each thread should write 1 column to dVj
+                // Update dVj
+                // dVj += Pij_transpose * dOi
+                for (int x = 0; x < d; x += 1) {
+                    float dot = 0;
+                    for (int r = 0; r < num_rows; r += 1) {
+                        dot += smem_SPij[r * block_size + thread_id] * smem_dOi[r * d + x];
+                    }
+                    smem_dVj[thread_id * d + x] += dot;
                 }
-                smem_dVj[thread_id * d + x] += dot;
             }
 
-            if ((i * block_size + thread_id) < N) {
+            if (global_row < N) {
                 // Compute dPij
                 // dPij = dOi * Vj_transpose
                 for (int c = 0; c < num_cols; c += 1) {
@@ -133,18 +137,22 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                     dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += dot;
                 }
             }
-            // Update dKj
-            // dKj += dSij_transpose * Qi
-            for (int x = 0; x < d; x += 1) {
-                float dot = 0;
-                for (int r = 0; r < num_rows; r += 1) {
-                    dot += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x];
+            
+            if (global_col < N) {
+                // Update dKj
+                // dKj += dSij_transpose * Qi
+                for (int x = 0; x < d; x += 1) {
+                    float dot = 0;
+                    for (int r = 0; r < num_rows; r += 1) {
+                        dot += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x];
+                    }
+                    smem_dKj[thread_id * d + x] += dot;
                 }
-                smem_dKj[thread_id * d + x] += dot;
             }
             // Make sure Qi, O, dOi load correctly
             __syncthreads();
         }
+
         // Write dKj, dVj to HBM
         if ((j * block_size + thread_id) < N) { 
             for (int x = 0; x < d; x += 1) {

@@ -36,10 +36,12 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
     const int offset_si = thread_id * Bc;  // Different thread process different row of Sij
 
     for (int j = 0; j < Tc; ++j) {
-        // Load Ki, Vj to the shared_memory
-        // Kj, Vj: Bc*d
+        // Note: Each thread may load multiple columns, since Bc != Br.
         for (int y = thread_id; y < Bc; y += num_threads) {
-            if ((j * Bc + y) < N) {  // Make sure global col < seq_len
+            int global_col = j * Bc + y;
+            if (global_col < N) {  // Make sure global col < seq_len
+                // Load Ki, Vj to the shared_memory
+                // Kj, Vj: Bc*d
                 for (int x = 0; x < d; x += 1) {
                     smem_Kj[y * d + x] = K[qkv_offset + (j * Bc * d) + (y * d) + x];
                     smem_Vj[y * d + x] = V[qkv_offset + (j * Bc * d) + (y * d) + x];
@@ -50,8 +52,9 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
 
         const int num_cols = min(Bc, N - (Bc * j));
         for (int i = 0; i < Tr; ++i) {
-            if ((i * Br + thread_id) < N) {  // Make sure global row < seq_len
+            int global_row = i * Br + thread_id;
 
+            if (global_row < N) {  // Make sure global row < seq_len
                 // Collaboratively Load Qi to shared memory
                 for (int x = 0; x < d; x += 1) {
                     smem_Qi[thread_id * d + x] = Q[qkv_offset + (i * Br * d) + (thread_id * d) + x];
