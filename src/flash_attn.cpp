@@ -4,11 +4,13 @@
 #include <cmath>
 #include <tuple>
 
+#include "c10/util/Exception.h"
 #include "flash_attn_kernel.h"
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> forward(torch::Tensor Q, torch::Tensor K, torch::Tensor V) {
     // Ensure tensors are on the same device
     auto device = Q.device();
+    TORCH_CHECK(device.is_cuda(), "All tensor should be placed on CUDA device")
     TORCH_CHECK(K.device() == device, "K must be on the same device as Q");
     TORCH_CHECK(V.device() == device, "V must be on the same device as Q");
 
@@ -39,6 +41,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> backward(torch::Tensor Q
                                                                  torch::Tensor m) {
     // Ensure tensors are on the same device
     auto device = Q.device();
+    TORCH_CHECK(device.is_cuda(), "All tensor should be placed on CUDA device")
     TORCH_CHECK(K.device() == device, "K must be on the same device as Q");
     TORCH_CHECK(V.device() == device, "V must be on the same device as Q");
     TORCH_CHECK(O.device() == device, "O must be on the same device as Q");
