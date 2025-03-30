@@ -1,26 +1,9 @@
-# Flash Attention Lite
-This repository provides a very basic implementation of FlashAttention-1, including both the forward and backward passes. The goal of this project is to deepen my understanding of the FlashAttention mechanism.
+# Flash attention with lazily materialized attention mask
 
-## Prerequisites:
-- CUDA/CUDAtoolkit
-- Torch 
+> This repo is a fork of https://github.com/weiyu0824/flash-attention-lite.
 
-## Run Code 
-- Check out `kernels/` directory to review the minimal implementaion.
-    
-- To compile cpp-extension, run: 
-    ```
-    bash local_build.sh
-    ```
-- To test flash-attention, run:
-    ```
-    python3 main.py
-    ```
-    
-## Details
-- Forward pass: Implements follow dynamic block size described in the FlashAttention paper. The block size for rows and columns are different, with the number of threads per block equal to the block size of the rows.
-- Backward pass: Uses a fixed block size of 32 for both rows and columns, with the number of threads per block also set to 32 for simplicity. The author metioned this simplification in [this issue](https://github.com/Dao-AILab/flash-attention/issues/618). 
-- Data Type: All tensors are fixed to the float data type for simplicity.
 
-## Reference
-- https://github.com/tspeterkim/flash-attention-minimal
+- Attention mask is constructed as $mask=ispositive(MM^T)$, where $M$ has shape `(seq_len, mask_dim)`. 
+  - The $ispositive$ is an element-wise operation returning True if the element is positive, otherwise False.
+  - `mask_dim` is often the same order of magnitude as `embed_dim` for $Q, K$ and $V$.
+- `nan` can apppear when an entire row in attention mask is all zero.
