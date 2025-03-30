@@ -3,7 +3,8 @@
 
 
 __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l, float *m, const int N, const int d,
-                               const int Bc, const int Br, const int Tc, const int Tr, const float scale) {
+                               const int Bc, const int Br, const int Tc, const int Tr, const float scale, 
+                               const int32_t* mf, const int dm) {
     // Given Q, K, V, we need to compute O
     //
     // Q, K, V: query, key, value (N * d)
@@ -22,16 +23,19 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
 
     // Differnt offset for different (batch, head)
     int qkv_offset = (batch_id * num_head * N * d) + (head_id * N * d);
+    int mask_offset = batch_id * N * dm;
     int lm_offset = (batch_id * num_head * N) + (head_id * N);
 
     // Shared memory stored K, V, Q, SP;
     // Note: SP stored Sij and Pij
     // Note: Why SPij in shared memory? because their size is dynamic
     extern __shared__ float sram[];
-    float *const smem_Kj = &sram[0];                           // size=(Bc * d)
-    float *const smem_Vj = &sram[Bc * d];                      // size=(Bc * d)
-    float *const smem_Qi = &sram[Bc * d + Bc * d];             // size=(Br * d)
-    float *const smem_SPij = &sram[Bc * d + Bc * d + Br * d];  // size=(Bc * Br)
+    float *const smem_Kj = &sram[0];                                              // size=(Bc * d)
+    float *const smem_Vj = &sram[Bc * d];                                         // size=(Bc * d)
+    float *const smem_Qi = &sram[Bc * d + Bc * d];                                // size=(Br * d)
+    float *const smem_SPij = &sram[Bc * d + Bc * d + Br * d];                     // size=(Bc * Br)
+    int32_t *const smem_Mi = reinterpret_cast<int32_t *const>(&sram[Bc * d + Bc * d + Br * d + Bc * Br]);           // size=(Br * dm)
+    int32_t *const smem_Mj = reinterpret_cast<int32_t *const>(&sram[Bc * d + Bc * d + Br * d + Bc * Br + Br * dm]); // size=(Bc * dm)
 
     const int offset_si = thread_id * Bc;  // Different thread process different row of Sij
 
@@ -46,6 +50,11 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                     smem_Kj[y * d + x] = K[qkv_offset + (j * Bc * d) + (y * d) + x];
                     smem_Vj[y * d + x] = V[qkv_offset + (j * Bc * d) + (y * d) + x];
                 }
+
+                // load Mj to sram
+                for(int x = 0; x < dm; x++) {
+                    smem_Mj[y * dm + x] = mf[mask_offset + (j * Bc * dm) + (y * dm) + x];
+                }
             }
         }
         __syncthreads();
@@ -59,6 +68,12 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                 for (int x = 0; x < d; x += 1) {
                     smem_Qi[thread_id * d + x] = Q[qkv_offset + (i * Br * d) + (thread_id * d) + x];
                 }
+
+                // load Mi to sram
+                for (int x = 0; x < dm; x++) {
+                    smem_Mi[thread_id * dm + x] = mf[mask_offset + (i * Br * dm) + (thread_id * dm) + x];
+                }
+
                 __syncthreads();
 
                 // Load li, mi from HBM to register
@@ -72,6 +87,16 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                         dot += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
                     }
                     smem_SPij[offset_si + c] = dot * scale;
+                }
+
+                // mask = Mi @ Mj^T, apply mask bias
+                for(int c = 0; c < num_cols; c++){
+                    int masksum = 0;
+                    for(int x = 0; x < dm; x++){
+                        masksum += (smem_Mi[thread_id * dm + x] * smem_Mj[c * dm + x]);
+                    }
+
+                    smem_SPij[offset_si + c] += masksum > 0 ? 0.0 : -INFINITY;
                 }
 
                 // Find new maximum mi for each row
@@ -124,12 +149,14 @@ inline void CHECK_CUDA_ERROR() {
 }
 
 void launch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, torch::Tensor l, torch::Tensor m,
-                           torch::Tensor O) {
+                           torch::Tensor O, torch::Tensor mf) {
     //
     int batch_size = Q.size(0);
     int num_heads = Q.size(1);
     int N = Q.size(2);
     int d = Q.size(3);
+    int dm = mf.size(2);
+
     printf("Batch=%d, Head=%d, SeqLen=%d, EmbDim=%d\n", batch_size, num_heads, N, d);
     //
     int max_shared_memory;
@@ -138,16 +165,22 @@ void launch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, to
     cudaDeviceGetAttribute(&max_threads_num, cudaDevAttrMaxThreadsPerBlock, 0);
     // 
     int M = max_shared_memory / sizeof(float);  // number of floats shared memory can hold
-    int Bc = std::ceil(M / (4 * d));
-    int Br = std::min(std::min(Bc, d), max_threads_num);
+
+    // int Bc = std::ceil(M / (4 * d));
+    // int Br = std::min(std::min(Bc, d), max_threads_num);
+
+    int Bc = 32;
+    int Br = 32;
+    printf("Br=%d, Bc=%d\n", Br, Bc);
+    
     int Tc = (int)std::ceil(float(N) / Bc);
     int Tr = (int)std::ceil(float(N) / Br);
 
     dim3 grid_dim(batch_size, num_heads);
     dim3 thread_block_dim(Br);
     // shared_memory_size
-    // For: Ki, Vi, Qi, Sij
-    const int shared_memory_size = sizeof(float) * ((2 * Bc * d) + (Br * d) + (Bc * Br));
+    // For: Ki, Vi, Qi, Sij, Mi, Mj
+    const int shared_memory_size = sizeof(float) * ((2 * Bc * d) + (Br * d) + (Bc * Br)) + sizeof(int32_t) * ((Bc * dm) + (Br * dm));
 
     printf("Max_shared(bytes)=%d, Max_shared(#dtype)=%d, Requested_memory(bytes)=%d\n", max_shared_memory, M,
            shared_memory_size);
@@ -159,7 +192,8 @@ void launch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, to
     // Launch
     forward_kernel<<<grid_dim, thread_block_dim, shared_memory_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(), l.data_ptr<float>(),
-        m.data_ptr<float>(), N, d, Bc, Br, Tc, Tr, scale);
+        m.data_ptr<float>(), N, d, Bc, Br, Tc, Tr, scale,
+        mf.data_ptr<int32_t>(), dm);
 
     CHECK_CUDA_ERROR();
 }

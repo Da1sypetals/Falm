@@ -34,6 +34,8 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
     float *const smem_dOi = &sram[block_size * d * 6];
     float *const smem_SPij = &sram[block_size * d * 7];
     float *const smem_dSPij = &sram[block_size * d * 7 + block_size * block_size];
+    float *const smem_Mi = &sram[block_size * d * 7 + block_size * block_size];
+    float *const smem_Mj = &sram[block_size * d * 7 + block_size * block_size];
 
     int offset_si = block_size * thread_id;
 
