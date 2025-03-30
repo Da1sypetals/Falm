@@ -1,9 +1,9 @@
 #include <cmath>
+#include <torch/extension.h>
 
-#include "flash_attn_kernel.h"
 
 __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l, float *m, const int N, const int d,
-                               const int Bc, const int Br, const int Tc, const int Tr) {
+                               const int Bc, const int Br, const int Tc, const int Tr, const float scale) {
     // Given Q, K, V, we need to compute O
     //
     // Q, K, V: query, key, value (N * d)
@@ -71,7 +71,7 @@ __global__ void forward_kernel(float *Q, float *K, float *V, float *O, float *l,
                     for (int x = 0; x < d; x += 1) {
                         dot += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
                     }
-                    smem_SPij[offset_si + c] = dot;
+                    smem_SPij[offset_si + c] = dot * scale;
                 }
 
                 // Find new maximum mi for each row
@@ -154,10 +154,12 @@ void launch_forward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, to
     TORCH_CHECK(shared_memory_size < max_shared_memory, "Shared memory size exceeds the device limit");
     printf("N=%d, d=%d, Bc=%d, Br=%d, Tc=%d, Tr=%d\n", N, d, Bc, Br, Tc, Tr);
 
+    float scale = 1.0f / std::sqrt(static_cast<float>(K.size(3)));
+
     // Launch
     forward_kernel<<<grid_dim, thread_block_dim, shared_memory_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(), l.data_ptr<float>(),
-        m.data_ptr<float>(), N, d, Bc, Br, Tc, Tr);
+        m.data_ptr<float>(), N, d, Bc, Br, Tc, Tr, scale);
 
     CHECK_CUDA_ERROR();
 }

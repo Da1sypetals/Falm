@@ -1,9 +1,9 @@
 #include <cuda.h>
+#include <torch/extension.h>
 
-#include "flash_attn_kernel.h"
 
 __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *dQ, float *dK, float *dV, float *dO,
-                                float *l, float *m, const int N, const int d, const int Tc, const int Tr) {
+                                float *l, float *m, const int N, const int d, const int Tc, const int Tr, const float scale) {
     // Given Q, K, V, O, dO, l, m, we need to compute dQ, dK, dV
     //
     // Q, K, V, O: query, key, value, output (N * d)
@@ -57,7 +57,7 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
 
         for (int i = 0; i < Tr; ++i) {
             const int num_rows = min(block_size, N - (block_size * i));
-            const global_row = i * block_size + thread_id; 
+            const int global_row = i * block_size + thread_id; 
    
             if (global_row < N) {  // Make sure global row < seq_len
                 // Load Qi, dOi to register
@@ -78,7 +78,7 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                     for (int x = 0; x < d; x += 1) {
                         dot += (smem_Qi[thread_id * d + x] * smem_Kj[c * d + x]);
                     }
-                    smem_SPij[offset_si + c] = dot;
+                    smem_SPij[offset_si + c] = dot * scale;
                 }
 
                 // Compute Pij
@@ -134,7 +134,7 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                     for (int c = 0; c < num_cols; c += 1) {
                         dot += smem_dSPij[thread_id * block_size + c] * smem_Kj[c * d + x];
                     }
-                    dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += dot;
+                    dQ[qkvo_offset + (i * block_size * d) + (thread_id * d) + x] += dot * scale;
                 }
             }
             
@@ -146,7 +146,7 @@ __global__ void backward_kernel(float *Q, float *K, float *V, float *O, float *d
                     for (int r = 0; r < num_rows; r += 1) {
                         dot += smem_dSPij[r * block_size + thread_id] * smem_Qi[r * d + x];
                     }
-                    smem_dKj[thread_id * d + x] += dot;
+                    smem_dKj[thread_id * d + x] += dot * scale;
                 }
             }
             // Make sure Qi, O, dOi load correctly
@@ -204,11 +204,13 @@ void launch_backward_kernel(torch::Tensor Q, torch::Tensor K, torch::Tensor V, t
 
     printf("N=%d, d=%d, block_size=%d, Tc=%d, Tr=%d\n", N, d, block_size, Tc, Tr);
 
+    float scale = 1.0f / std::sqrt(static_cast<float>(K.size(3)));
+
     // Launch
     backward_kernel<<<grid_dim, thread_block_dim, shared_memory_size>>>(
         Q.data_ptr<float>(), K.data_ptr<float>(), V.data_ptr<float>(), O.data_ptr<float>(), dQ.data_ptr<float>(),
         dK.data_ptr<float>(), dV.data_ptr<float>(), dO.data_ptr<float>(), l.data_ptr<float>(), m.data_ptr<float>(), N,
-        d, Tc, Tr);
+        d, Tc, Tr, scale);
 
-    CHECK_CUDA_ERROR();
+    // CHECK_CUDA_ERROR();
 }
